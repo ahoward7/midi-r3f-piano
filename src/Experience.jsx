@@ -64,31 +64,40 @@ export default function Experience() {
     catch (error) {
       console.error("Error handling MIDI message:", error)
     }
-  }, [onKeyDown, onKeyUp])
+  }, [])
 
   // Setup and cleaup MIDI input
   useEffect(() => {
     if (navigator.requestMIDIAccess) {
       navigator.requestMIDIAccess().then((midiAccess) => {
-        const inputs = Array.from(midiAccess.inputs.values())
-
-        inputs.forEach((input) => {
+        const handleInput = (input) => {
+          input.onmidimessage = null // Remove old listener
           input.onmidimessage = onMIDIMessage
-        })
+        }
+
+        const inputs = Array.from(midiAccess.inputs.values())
+        inputs.forEach(handleInput)
 
         midiAccess.onstatechange = (event) => {
           const port = event.port
           if (port.type === "input" && port.state === "connected") {
-            port.onmidimessage = onMIDIMessage
+            handleInput(port)
           }
         }
       })
+
     }
     else {
       console.warn("Web MIDI API not supported in this browser.")
     }
 
-    return () => { }
+    return () => {
+      if (midiAccess) {
+        for (const input of midiAccess.inputs.values()) {
+          input.onmidimessage = null
+        }
+      }
+    }
   }, [onMIDIMessage])
 
   const totalWidth = 52 * (1 + noteGap)
@@ -130,7 +139,6 @@ export default function Experience() {
 
     return keys
   }, [getBlackKeyOffset])
-
 
   return (
     <>
