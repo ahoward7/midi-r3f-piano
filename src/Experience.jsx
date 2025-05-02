@@ -8,6 +8,9 @@ export default function Experience() {
   const noteDepth = 10
   const noteGap = 0.05
 
+  // Animation timeline reference to manage and kill animations
+  const animationsRef = useRef({})
+
   // Add to pressed keys and animate key down
   const onKeyDown = useCallback((index) => {
     if (index < 0 || index >= 88) return
@@ -20,7 +23,12 @@ export default function Experience() {
 
     const key = keyRefs.current[index]
     if (key) {
-      gsap.to(key.rotation, { x: 0.05, duration: 0.1 })
+      // Kill any existing animation on this key
+      if (animationsRef.current[index]) {
+        animationsRef.current[index].kill()
+      }
+      // Store the new animation
+      animationsRef.current[index] = gsap.to(key.rotation, { x: 0.05, duration: 0.1 })
     }
   }, [])
 
@@ -36,9 +44,17 @@ export default function Experience() {
 
     const key = keyRefs.current[index]
     if (key) {
-      gsap.to(key.rotation, { x: 0, duration: 0.1 })
+      // Kill any existing animation on this key
+      if (animationsRef.current[index]) {
+        animationsRef.current[index].kill()
+      }
+      // Store the new animation
+      animationsRef.current[index] = gsap.to(key.rotation, { x: 0, duration: 0.1 })
     }
   }, [])
+
+  // Throttle MIDI events to prevent overwhelming the UI
+  const lastMIDIEventTime = useRef({})
 
   // MIDI message handler as stable callback
   const onMIDIMessage = useCallback((event) => {
@@ -53,28 +69,44 @@ export default function Experience() {
 
       // Check if key is within range
       if (keyIndex >= 0 && keyIndex < 88) {
-        if (command === 144 && velocity > 0) {
-          onKeyDown(keyIndex)
-        }
-        else if (command === 128 || (command === 144 && velocity === 0)) {
-          onKeyUp(keyIndex)
+        // Simple throttling to prevent event flooding
+        const now = performance.now()
+        const lastTime = lastMIDIEventTime.current[keyIndex] || 0
+
+        // Only process events that are at least 10ms apart for the same key
+        if (now - lastTime > 10) {
+          lastMIDIEventTime.current[keyIndex] = now
+
+          if (command === 144 && velocity > 0) {
+            onKeyDown(keyIndex)
+          }
+          else if (command === 128 || (command === 144 && velocity === 0)) {
+            onKeyUp(keyIndex)
+          }
         }
       }
     }
     catch (error) {
       console.error("Error handling MIDI message:", error)
     }
-  }, [])
+  }, [onKeyDown, onKeyUp])
 
-  // Setup and cleaup MIDI input
+  // Setup and cleanup MIDI input
   useEffect(() => {
-    if (navigator.requestMIDIAccess) {
-      navigator.requestMIDIAccess().then((midiAccess) => {
-        const handleInput = (input) => {
-          input.onmidimessage = null // Remove old listener
-          input.onmidimessage = onMIDIMessage
-        }
+    let midiAccess
+    let activeInputs = new Set()
 
+    const handleInput = (input) => {
+      // Only add event listener if not already added
+      if (!activeInputs.has(input.id)) {
+        input.onmidimessage = onMIDIMessage
+        activeInputs.add(input.id)
+      }
+    }
+
+    const setupMIDI = async () => {
+      try {
+        midiAccess = await navigator.requestMIDIAccess()
         const inputs = Array.from(midiAccess.inputs.values())
         inputs.forEach(handleInput)
 
@@ -82,23 +114,41 @@ export default function Experience() {
           const port = event.port
           if (port.type === "input" && port.state === "connected") {
             handleInput(port)
+          } else if (port.type === "input" && port.state === "disconnected") {
+            activeInputs.delete(port.id)
           }
         }
-      })
-
-    }
-    else {
-      console.warn("Web MIDI API not supported in this browser.")
+      } catch (err) {
+        console.error("Failed to access MIDI devices:", err)
+      }
     }
 
+    setupMIDI()
+
+    // Cleanup function
     return () => {
       if (midiAccess) {
         for (const input of midiAccess.inputs.values()) {
           input.onmidimessage = null
         }
       }
+
+      // Kill all active animations
+      Object.values(animationsRef.current).forEach(animation => {
+        if (animation) animation.kill()
+      })
+      animationsRef.current = {}
     }
   }, [onMIDIMessage])
+
+  // Memory cleanup for component unmount
+  useEffect(() => {
+    return () => {
+      // Clear all references
+      keyRefs.current = []
+      lastMIDIEventTime.current = {}
+    }
+  }, [])
 
   const totalWidth = 52 * (1 + noteGap)
   const pianoOffsetX = -totalWidth / 2 + 0.5
