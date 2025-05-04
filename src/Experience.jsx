@@ -5,154 +5,129 @@ import PianoKey from './PianoKey'
 export default function Experience() {
   const keyRefs = useRef([])
   const [pressedKeys, setPressedKeys] = useState(new Set())
-  const noteDepth = 10
+  const animationsRef = useRef({})
+  const lastMIDIEventTime = useRef({})
+  const activeInputs = useRef(new Set())
+
+  const noteDepth = 8
   const noteGap = 0.05
 
-  // Animation timeline reference to manage and kill animations
-  const animationsRef = useRef({})
+  const animateKey = (index, down) => {
+    const key = keyRefs.current[index]
+    if (!key) return
 
-  // Add to pressed keys and animate key down
+    const targetX = down ? 0.05 : 0
+
+    if (animationsRef.current[index]) {
+      animationsRef.current[index].kill()
+    }
+
+    animationsRef.current[index] = gsap.to(key.rotation, {
+      x: targetX,
+      duration: 0.05,
+    })
+  }
+
   const onKeyDown = useCallback((index) => {
     if (index < 0 || index >= 88) return
 
     setPressedKeys((prev) => {
-      const newSet = new Set(prev)
-      newSet.add(index)
-      return newSet
+      if (prev.has(index)) return prev
+      const next = new Set(prev)
+      next.add(index)
+      return next
     })
 
-    const key = keyRefs.current[index]
-    if (key) {
-      // Kill any existing animation on this key
-      if (animationsRef.current[index]) {
-        animationsRef.current[index].kill()
-      }
-      // Store the new animation
-      animationsRef.current[index] = gsap.to(key.rotation, { x: 0.05, duration: 0.1 })
-    }
+    animateKey(index, true)
   }, [])
 
-  // Remove from pressed keys and animate key up
-  const onKeyUp = useCallback((index) => {
+  const onKeyUp = useCallback((index, velocity) => {
     if (index < 0 || index >= 88) return
 
     setPressedKeys((prev) => {
-      const newSet = new Set(prev)
-      newSet.delete(index)
-      return newSet
+      if (!prev.has(index)) return prev
+      const next = new Set(prev)
+      next.delete(index)
+      return next
     })
 
-    const key = keyRefs.current[index]
-    if (key) {
-      // Kill any existing animation on this key
-      if (animationsRef.current[index]) {
-        animationsRef.current[index].kill()
-      }
-      // Store the new animation
-      animationsRef.current[index] = gsap.to(key.rotation, { x: 0, duration: 0.1 })
-    }
+    animateKey(index, false, velocity)
   }, [])
 
-  // Throttle MIDI events to prevent overwhelming the UI
-  const lastMIDIEventTime = useRef({})
-
-  // MIDI message handler as stable callback
   const onMIDIMessage = useCallback((event) => {
     try {
-      const message = event.data
-      const command = message[0]
-      const note = message[1]
-      const velocity = message[2]
-
-      // Map MIDI note to piano key (MIDI notes start at 21 for A0)
+      const [command, note, velocity] = event.data
       const keyIndex = note - 21
 
-      // Check if key is within range
-      if (keyIndex >= 0 && keyIndex < 88) {
-        // Simple throttling to prevent event flooding
-        const now = performance.now()
-        const lastTime = lastMIDIEventTime.current[keyIndex] || 0
+      if (keyIndex < 0 || keyIndex >= 88) return
 
-        // Only process events that are at least 10ms apart for the same key
-        if (now - lastTime > 10) {
-          lastMIDIEventTime.current[keyIndex] = now
+      const now = performance.now()
+      const last = lastMIDIEventTime.current[keyIndex] || 0
 
-          if (command === 144 && velocity > 0) {
-            onKeyDown(keyIndex)
-          }
-          else if (command === 128 || (command === 144 && velocity === 0)) {
-            onKeyUp(keyIndex)
-          }
-        }
+      if (now - last < 10) return
+      lastMIDIEventTime.current[keyIndex] = now
+
+      if (command === 144 && velocity > 0) {
+        onKeyDown(keyIndex)
+      } else if (command === 128 || (command === 144 && velocity === 0)) {
+        onKeyUp(keyIndex)
       }
-    }
-    catch (error) {
-      console.error("Error handling MIDI message:", error)
+    } catch (err) {
+      console.error('MIDI error:', err)
     }
   }, [onKeyDown, onKeyUp])
 
-  // Setup and cleanup MIDI input
   useEffect(() => {
     let midiAccess
-    let activeInputs = new Set()
 
     const handleInput = (input) => {
-      // Only add event listener if not already added
-      if (!activeInputs.has(input.id)) {
+      if (!activeInputs.current.has(input.id)) {
         input.onmidimessage = onMIDIMessage
-        activeInputs.add(input.id)
+        activeInputs.current.add(input.id)
       }
     }
 
     const setupMIDI = async () => {
       try {
         midiAccess = await navigator.requestMIDIAccess()
-        const inputs = Array.from(midiAccess.inputs.values())
-        inputs.forEach(handleInput)
+        midiAccess.inputs.forEach(handleInput)
 
-        midiAccess.onstatechange = (event) => {
-          const port = event.port
-          if (port.type === "input" && port.state === "connected") {
-            handleInput(port)
-          } else if (port.type === "input" && port.state === "disconnected") {
-            activeInputs.delete(port.id)
+        midiAccess.onstatechange = (e) => {
+          const port = e.port
+          if (port.type === 'input') {
+            if (port.state === 'connected') handleInput(port)
+            else if (port.state === 'disconnected') activeInputs.current.delete(port.id)
           }
         }
       } catch (err) {
-        console.error("Failed to access MIDI devices:", err)
+        console.error('MIDI setup error:', err)
       }
     }
 
     setupMIDI()
 
-    // Cleanup function
     return () => {
       if (midiAccess) {
-        for (const input of midiAccess.inputs.values()) {
+        midiAccess.inputs.forEach((input) => {
           input.onmidimessage = null
-        }
+        })
       }
 
-      // Kill all active animations
-      Object.values(animationsRef.current).forEach(animation => {
-        if (animation) animation.kill()
-      })
+      Object.values(animationsRef.current).forEach((anim) => anim?.kill())
       animationsRef.current = {}
+      activeInputs.current.clear()
     }
   }, [onMIDIMessage])
 
-  // Memory cleanup for component unmount
   useEffect(() => {
     return () => {
-      // Clear all references
       keyRefs.current = []
       lastMIDIEventTime.current = {}
     }
   }, [])
 
   const totalWidth = 52 * (1 + noteGap)
-  const pianoOffsetX = -totalWidth / 2 + 0.5
-  const pianoOffsetZ = -noteDepth / 2
+  const offsetX = -totalWidth / 2 + 0.5 * (1 + noteGap)
 
   const getBlackKeyOffset = useCallback((index) => {
     switch (index % 12) {
@@ -170,21 +145,18 @@ export default function Experience() {
     let whiteKeyIndex = 0
 
     for (let i = 0; i < 88; i++) {
-      const isBlackKey = [1, 4, 6, 9, 11].includes(i % 12)
-      const width = isBlackKey ? 0.583 : 1
-      const height = isBlackKey ? 0.75 : 1
-      const depth = isBlackKey ? noteDepth * 0.6 : noteDepth
-      const color = isBlackKey ? 'black' : 'white'
+      const isBlack = [1, 4, 6, 9, 11].includes(i % 12)
+      const width = isBlack ? 0.583 : 1
+      const height = isBlack ? 0.75 : 1
+      const depth = isBlack ? noteDepth * 0.6 : noteDepth
+      const color = isBlack ? 'black' : 'white'
       const offset = getBlackKeyOffset(i)
-      const x = isBlackKey
-        ? (whiteKeyIndex - 0.5) * (1 + noteGap) + offset
-        : whiteKeyIndex * (1 + noteGap)
-      const y = isBlackKey ? 0.9 : 0
+      const x = isBlack ? (whiteKeyIndex - 0.5) * (1 + noteGap) + offset : whiteKeyIndex * (1 + noteGap)
+      const y = isBlack ? 0.9 : 0
       const position = [x, y, 0]
 
-      if (!isBlackKey) whiteKeyIndex++
-
-      keys.push({ index: i, isBlack: isBlackKey, position, dimensions: [width, height, depth], color })
+      if (!isBlack) whiteKeyIndex++
+      keys.push({ index: i, isBlack, position, dimensions: [width, height, depth], color })
     }
 
     return keys
@@ -192,11 +164,18 @@ export default function Experience() {
 
   return (
     <>
-      {/* <OrbitControls /> */}
+      <color args={['#171717']} attach="background" />
+
       <directionalLight position={[0, 10, 2]} intensity={5} />
       <ambientLight intensity={1} />
 
-      <group position={[pianoOffsetX, 0, pianoOffsetZ]}>
+      <mesh position={[0, 1, 0]}>
+        <boxGeometry args={[totalWidth, 0.1, 2]} />
+        <meshStandardMaterial color="#171717" />
+      </mesh>
+
+
+      <group position={[offsetX, 0, -1.5]}>
         {keyProps.map(({ index, isBlack, position, dimensions, color }) => (
           <PianoKey
             key={index}
